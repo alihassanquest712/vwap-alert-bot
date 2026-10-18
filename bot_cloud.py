@@ -108,7 +108,7 @@ DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK",    "")
 GMAIL_SENDER       = os.environ.get("GMAIL_SENDER",       "")
 GMAIL_APP_PASS     = os.environ.get("GMAIL_APP_PASS",     "")
 GMAIL_RECEIVER     = os.environ.get("GMAIL_RECEIVER",     "")
-NTFY_TOPIC         = os.environ.get("NTFY_TOPIC",         "trading_alerts_nowick_99")
+NTFY_TOPIC         = os.environ.get("NTFY_TOPIC") or "trading_alerts_nowick_99"
 
 # ── Symbols & Timeframes Mapping ─────────────────────────────────────
 # 1. Gold, US30, NAS100: Tracked on 5m, 15m, 30m, 1h
@@ -142,6 +142,7 @@ FOREX_SYMBOLS = [
     "OANDA:CADJPY",
 ]
 FOREX_TIMEFRAMES = [
+    ("5",  "5m"),
     ("15", "15m"),
     ("30", "30m"),
     ("60", "1h"),
@@ -567,12 +568,21 @@ if __name__ == "__main__":
     has_telegram = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
     has_discord  = bool(DISCORD_WEBHOOK)
     has_gmail    = bool(GMAIL_SENDER and GMAIL_APP_PASS and GMAIL_RECEIVER)
+    has_ntfy     = bool(NTFY_TOPIC)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        print("\n--- SENDING TEST ALERT TO ALL ACTIVE CHANNELS ---")
+        sig = {'type': 'INSTANT_BUY', 'price': 1.12450, 'level': 1.12400, 'ts': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}
+        send_all("OANDA:EURUSD", sig, "15m")
+        print("--- TEST ALERT DISPATCH COMPLETE ---")
+        sys.exit(0)
 
     now_str = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
     print(f"[{now_str}] Starting Multi-TF Scanner...")
     print(f"  VIP (Gold, US30, NAS100): 5m, 15m, 30m, 1h")
-    print(f"  Forex (14 Pairs): 15m, 30m, 1h")
+    print(f"  Forex (14 Pairs): 5m, 15m, 30m, 1h")
     print(f"  Channels: "
+          f"{'ntfy: ON' if has_ntfy else 'ntfy: OFF'} | "
           f"{'Discord: ON' if has_discord else 'Discord: OFF'} | "
           f"{'Gmail: ON' if has_gmail else 'Gmail: OFF'} | "
           f"{'Telegram: ON' if has_telegram else 'Telegram: OFF'}")
