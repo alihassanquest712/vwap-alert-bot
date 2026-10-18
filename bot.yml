@@ -1,0 +1,60 @@
+name: VWAP NoWick Alert Bot
+
+on:
+  schedule:
+    # Har 5 minute pe run karo (UTC)
+    - cron: '*/5 * * * *'
+  workflow_dispatch:  # Manual run ka button bhi milega GitHub pe
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4   # 5 min se pehle complete ho
+
+    steps:
+      # 1. Code download karo
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Python setup
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3. Dependencies install
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      # 4. State restore (previous run ki state)
+      - name: Restore Bot State
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: |
+            bot-state-
+
+      # 5. BOT RUN KARO
+      - name: Run Alert Bot
+        env:
+          # Telegram (optional)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Discord (optional)
+          DISCORD_WEBHOOK:    ${{ secrets.DISCORD_WEBHOOK }}
+          # Gmail (optional)
+          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASS:     ${{ secrets.GMAIL_APP_PASS }}
+          GMAIL_RECEIVER:     ${{ secrets.GMAIL_RECEIVER }}
+          # ntfy App (Loud Mobile Push Alert)
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC || 'trading_alerts_nowick_99' }}
+        run: python bot_cloud.py
+
+      # 6. State save karo (agly run ke liye)
+      - name: Save Bot State
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: bot-state-${{ github.run_id }}

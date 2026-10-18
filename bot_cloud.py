@@ -80,7 +80,7 @@ class TVWebSocketClient:
         self.send_message("create_series", [chart_session, "s" + self.timeframe, "s" + self.timeframe, "symbol_" + self.timeframe, self.timeframe, self.candles])
 
         st = time.time()
-        while self.result_data is None and (time.time() - st) < 5:
+        while self.result_data is None and (time.time() - st) < 8:
             try:
                 result = self.ws.recv()
                 data = re.split(r'~m~\d+~m~', result)
@@ -108,6 +108,7 @@ DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK",    "")
 GMAIL_SENDER       = os.environ.get("GMAIL_SENDER",       "")
 GMAIL_APP_PASS     = os.environ.get("GMAIL_APP_PASS",     "")
 GMAIL_RECEIVER     = os.environ.get("GMAIL_RECEIVER",     "")
+NTFY_TOPIC         = os.environ.get("NTFY_TOPIC",         "trading_alerts_nowick_99")
 
 # ── Symbols & Timeframes Mapping ─────────────────────────────────────
 # 1. Gold, US30, NAS100: Tracked on 5m, 15m, 30m, 1h
@@ -444,6 +445,26 @@ def send_discord(msg):
     except Exception as e:
         print(f"    [-] Discord: {e}")
 
+def send_ntfy(disp_name, sig, tf_label, plain_body):
+    if not NTFY_TOPIC:
+        return
+    is_buy = "BUY" in sig['type']
+    side = "BUY" if is_buy else "SELL"
+    price_str = f"{sig['price']:.5f}" if sig['price'] < 500 else f"{sig['price']:.2f}"
+    clean_title = f"{side} [{tf_label}]: {disp_name} @ {price_str}"
+    
+    headers = {
+        "Title": clean_title,
+        "Priority": "urgent",
+        "Tags": "rotating_light,chart_with_upwards_trend" if is_buy else "rotating_light,chart_with_downwards_trend"
+    }
+    try:
+        r = requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=plain_body.encode('utf-8'), headers=headers, timeout=10)
+        if r.status_code == 200:
+            print("    [+] ntfy: sent")
+    except Exception as e:
+        print(f"    [-] ntfy: {e}")
+
 def send_gmail(subject, plain_body):
     if not GMAIL_SENDER or not GMAIL_APP_PASS or not GMAIL_RECEIVER:
         return
@@ -489,6 +510,7 @@ def send_all(symbol, sig, tf_label):
     html_msg  = fmt(disp_name, sig, tf_label)
     plain_msg = fmt_plain(disp_name, sig, tf_label)
 
+    send_ntfy(disp_name, sig, tf_label, plain_msg)
     send_telegram(html_msg)
     send_discord(html_msg)
     send_gmail(
