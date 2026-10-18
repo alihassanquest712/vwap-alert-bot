@@ -1,22 +1,29 @@
 name: VWAP NoWick Alert Bot
+
 on:
   schedule:
+    # Har 5 minute pe run karo (UTC)
     - cron: '*/5 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # Manual run ka button
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 4
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
       - name: Install Dependencies
         run: pip install -r requirements.txt
+
       - name: Restore Bot State
         uses: actions/cache@v4
         with:
@@ -24,13 +31,18 @@ jobs:
           key: bot-state-${{ github.run_id }}
           restore-keys: |
             bot-state-
+
       - name: Run Alert Bot
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
-          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}
-          GMAIL_RECEIVER:  ${{ secrets.GMAIL_RECEIVER }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK:    ${{ secrets.DISCORD_WEBHOOK }}
+          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASS:     ${{ secrets.GMAIL_APP_PASS }}
+          GMAIL_RECEIVER:     ${{ secrets.GMAIL_RECEIVER }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
         run: python bot_cloud.py
+
       - name: Save Bot State
         uses: actions/cache@v4
         with:
