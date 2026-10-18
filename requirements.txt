@@ -1,5 +1,4 @@
-ccxt
+websocket-client
 pandas
 numpy
 requests
-schedule
