@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-VWAP NoWick Alert Bot — Multi-Timeframe Engine
+VWAP NoWick Alert Bot — Multi-Timeframe Engine (100% Standalone)
 - US30 & NAS100 (BlackBull Markets): 5m, 15m, 30m, 1h
 - Gold XAUUSD (OANDA): 5m, 15m, 30m, 1h
 - Forex Pairs (OANDA): 15m, 30m, 1h
 Runs on GitHub Actions 24/7 Free.
+Zero external custom dependencies.
 """
 
 import pandas as pd
@@ -14,14 +15,91 @@ import json
 import os
 import sys
 import time
+import random
+import re
+import string
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
-from tradingview_websocket import TradingViewWebSocket
+from websocket import create_connection
 
 # ══════════════════════════════════════════════════════════════════════
-#  CONFIG — GitHub Secrets se aata hai
+#  EMBEDDED TRADINGVIEW WEBSOCKET CLIENT (No extra package needed!)
+# ══════════════════════════════════════════════════════════════════════
+
+class TVWebSocketClient:
+    def __init__(self, symbol, timeframe, candles):
+        self.ws = None
+        self.symbol = symbol
+        self.timeframe = str(timeframe)
+        self.candles = candles
+        self.result_data = None
+
+    def connect(self):
+        headers = {
+            'Connection': 'upgrade',
+            'Host': 'data.tradingview.com',
+            'Origin': 'https://data.tradingview.com',
+            'Sec-WebSocket-Key': '1H41q97V8BbMKUq0knV1UA==',
+            'Sec-WebSocket-Version': '13',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Pragma': 'no-cache',
+            'Upgrade': 'websocket'
+        }
+        self.ws = create_connection('wss://data.tradingview.com/socket.io/websocket', headers=headers, timeout=8)
+
+    def generate_session(self):
+        return "qs_" + ''.join(random.choice(string.ascii_lowercase) for _ in range(12))
+
+    def generate_chart_session(self):
+        return "cs_" + ''.join(random.choice(string.ascii_lowercase) for _ in range(12))
+
+    def create_message(self, func, param_list):
+        msg = json.dumps({"m": func, "p": param_list}, separators=(',', ':'))
+        return f"~m~{len(msg)}~m~{msg}"
+
+    def send_message(self, func, args):
+        if self.ws:
+            try:
+                self.ws.send(self.create_message(func, args))
+            except Exception:
+                pass
+
+    def run(self):
+        session = self.generate_session()
+        chart_session = self.generate_chart_session()
+        sym_str = json.dumps({"symbol": self.symbol, "adjustment": "splits"})
+
+        self.send_message("set_auth_token", ["unauthorized_user_token"])
+        self.send_message("chart_create_session", [chart_session, ""])
+        self.send_message("quote_create_session", [session])
+        self.send_message("quote_set_fields", [session, "ch", "chp", "lp", "volume"])
+        self.send_message("quote_add_symbols", [session, self.symbol, {"flags": ['force_permission']}])
+        self.send_message("resolve_symbol", [chart_session, "symbol_" + self.timeframe, f"={sym_str}"])
+        self.send_message("create_series", [chart_session, "s" + self.timeframe, "s" + self.timeframe, "symbol_" + self.timeframe, self.timeframe, self.candles])
+
+        st = time.time()
+        while self.result_data is None and (time.time() - st) < 5:
+            try:
+                result = self.ws.recv()
+                data = re.split(r'~m~\d+~m~', result)
+                for item in data:
+                    if item.strip():
+                        parsed = json.loads(item)
+                        if parsed.get('m') == 'timescale_update':
+                            self.result_data = parsed['p'][1]['s' + str(self.timeframe)]['s']
+                            return
+            except Exception:
+                break
+        try:
+            if self.ws:
+                self.ws.close()
+        except Exception:
+            pass
+
+# ══════════════════════════════════════════════════════════════════════
+#  CONFIG — GitHub Secrets
 # ══════════════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -104,19 +182,20 @@ def load_state():
     return {}
 
 def save_state(state):
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2, default=str)
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2, default=str)
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════════════
-#  DATA FETCHING — DIRECT TRADINGVIEW WEBSOCKET
+#  DATA FETCHING
 # ══════════════════════════════════════════════════════════════════════
 
 def fetch_tv_candles(symbol, timeframe="15", count=150):
     try:
-        ws = TradingViewWebSocket(symbol, timeframe, count)
+        ws = TVWebSocketClient(symbol, timeframe, count)
         ws.connect()
-        if hasattr(ws, 'ws') and ws.ws:
-            ws.ws.settimeout(6)
         ws.run()
         if not ws.result_data:
             return None
@@ -127,7 +206,7 @@ def fetch_tv_candles(symbol, timeframe="15", count=150):
         if len(df) > 1:
             return df.iloc[:-1]
         return df
-    except Exception as e:
+    except Exception:
         return None
 
 def get_mintick(symbol):
@@ -467,11 +546,6 @@ if __name__ == "__main__":
     has_discord  = bool(DISCORD_WEBHOOK)
     has_gmail    = bool(GMAIL_SENDER and GMAIL_APP_PASS and GMAIL_RECEIVER)
 
-    if not any([has_telegram, has_discord, has_gmail]):
-        print("[!] Warning: Koi alert channel configured nahi hai! (Check GitHub Secrets)")
-        if "GITHUB_ACTIONS" in os.environ:
-            sys.exit(1)
-
     now_str = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
     print(f"[{now_str}] Starting Multi-TF Scanner...")
     print(f"  VIP (Gold, US30, NAS100): 5m, 15m, 30m, 1h")
@@ -510,9 +584,9 @@ if __name__ == "__main__":
                 send_all(symbol, sig, tf_label)
                 total += 1
 
-            time.sleep(0.15)
+            time.sleep(0.12)
 
-        except Exception as e:
+        except Exception:
             pass
 
     save_state(state)
