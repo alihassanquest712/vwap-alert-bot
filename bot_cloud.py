@@ -142,7 +142,6 @@ FOREX_SYMBOLS = [
     "OANDA:CADJPY",
 ]
 FOREX_TIMEFRAMES = [
-    ("5",  "5m"),
     ("15", "15m"),
     ("30", "30m"),
     ("60", "1h"),
@@ -150,8 +149,8 @@ FOREX_TIMEFRAMES = [
 
 # ── Indicator Parameters (Matching User's Pine Script Exactly) ───────
 BAND_MULT_1        = 1.0
-STRICT_ZERO_WICK   = False
-WICK_TOL_TICKS     = 1
+STRICT_ZERO_WICK   = True
+WICK_TOL_TICKS     = 0
 REQUIRE_PREV_COL   = True
 ENABLE_INSTANT     = True
 WICK_BODY_RATIO    = 1.0
@@ -205,8 +204,6 @@ def fetch_tv_candles(symbol, timeframe="15", count=150):
         df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True)
         df.set_index('ts', inplace=True)
-        if len(df) > 1:
-            return df.iloc[:-1]
         return df
     except Exception:
         return None
@@ -580,7 +577,7 @@ if __name__ == "__main__":
     now_str = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
     print(f"[{now_str}] Starting Multi-TF Scanner...")
     print(f"  VIP (Gold, US30, NAS100): 5m, 15m, 30m, 1h")
-    print(f"  Forex (14 Pairs): 5m, 15m, 30m, 1h")
+    print(f"  Forex (14 Pairs): 15m, 30m, 1h")
     print(f"  Channels: "
           f"{'ntfy: ON' if has_ntfy else 'ntfy: OFF'} | "
           f"{'Discord: ON' if has_discord else 'Discord: OFF'} | "
