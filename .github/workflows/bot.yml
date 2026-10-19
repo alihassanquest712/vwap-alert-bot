@@ -12,6 +12,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: vwap-bot-runner
+  cancel-in-progress: true
+
 permissions:
   actions: write
   contents: read
