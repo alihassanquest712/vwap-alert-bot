@@ -1,16 +1,25 @@
-name: VWAP NoWick Alert Bot
+name: VWAP NoWick 24/7 Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Backup restart trigger har 4 ghante baad
+    - cron: '0 */4 * * *'
   workflow_dispatch:
-  push:
-    branches: [ main ]
+    inputs:
+      test_alert:
+        description: 'Check to send LIVE Test Alert to Discord, Gmail & ntfy'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 360  # Continuous runner (max 6 hours per cycle)
 
     steps:
       - name: Checkout Code
@@ -20,9 +29,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Dependencies
-        run: pip install websocket-client pandas numpy requests
+        run: pip install -r requirements.txt
 
       - name: Restore Bot State
         uses: actions/cache@v4
@@ -32,15 +42,27 @@ jobs:
           restore-keys: |
             bot-state-
 
-      - name: Run Alert Bot
+      - name: Run 24/7 Continuous Alert Bot
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
-          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}
-          GMAIL_RECEIVER:  ${{ secrets.GMAIL_RECEIVER }}
-        run: python bot_cloud.py
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+          MAX_RUNTIME_SECONDS: 19800
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK:    ${{ secrets.DISCORD_WEBHOOK }}
+          GMAIL_SENDER:       ${{ secrets.GMAIL_SENDER }}
+          GMAIL_APP_PASS:     ${{ secrets.GMAIL_APP_PASS }}
+          GMAIL_RECEIVER:     ${{ secrets.GMAIL_RECEIVER }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ "${{ inputs.test_alert }}" = "true" ]; then
+            python bot_cloud.py --test
+          else
+            python bot_cloud.py
+          fi
 
       - name: Save Bot State
+        if: always()
         uses: actions/cache@v4
         with:
           path: bot_state.json
