@@ -21,7 +21,7 @@ import string
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from websocket import create_connection
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -257,10 +257,11 @@ def in_session(ts):
 #  SIGNAL DETECTION ENGINE
 # ══════════════════════════════════════════════════════════════════════
 
-def detect_signals(df, sym_state, symbol=""):
+def detect_signals(df, sym_state, symbol="", tf_code="15"):
     df = add_vwap_bands(df)
     mintick = get_mintick(symbol)
     tol = 0.0 if STRICT_ZERO_WICK else (WICK_TOL_TICKS * mintick)
+    tf_mins = int(tf_code) if str(tf_code).isdigit() else 15
 
     sent_keys     = set(sym_state.get('sent_keys', []))
     new_signals   = []
@@ -306,83 +307,100 @@ def detect_signals(df, sym_state, symbol=""):
                 if c < bear_lo: bear_ic += 1; bear_lo = l
                 elif l < bear_lo: bear_lo = l
 
-        # ── 2. Previous Candle Same Color ──
-        prev_green = df['close'].iloc[i-1] > df['open'].iloc[i-1]
-        prev_red   = df['close'].iloc[i-1] < df['open'].iloc[i-1]
-        bp = (not REQUIRE_PREV_COL) or prev_green
-        sp = (not REQUIRE_PREV_COL) or prev_red
-
-        # ── 3. Left Lookback Window Clearance ──
-        hi_h = df['high'].iloc[max(0, i-LEFT_WINDOW):i].max() if ENABLE_LEFT_FILTER else 0
-        lo_l = df['low'].iloc[max(0, i-LEFT_WINDOW):i].min() if ENABLE_LEFT_FILTER else 9e9
-        bl = (h > hi_h) if LEFT_CLEARANCE else (l > hi_h)
-        sl = (l < lo_l) if LEFT_CLEARANCE else (h < lo_l)
-        if not ENABLE_LEFT_FILTER: bl = sl = True
-
-        # ── 4. VWAP Band Position Filter ──
-        if not ENABLE_BB_FILTER:
-            bo = so = True
-        elif BB_ENTIRE_CANDLE:
-            bo, so = l > upp, h < low_
-        else:
-            bo, so = c > upp, c < low_
-
-        # ── 5. Opposite Band No-Touch Lookback Window ──
-        boc = boc2 = True
-        if ENABLE_BB_FILTER and i >= BB_LOOKBACK:
-            for k in range(BB_LOOKBACK):
-                ki = i - k
-                if df['low'].iloc[ki]  <= df['lower'].iloc[ki]: boc  = False
-                if df['high'].iloc[ki] >= df['upper'].iloc[ki]: boc2 = False
-
-        biq = ENABLE_IC_BYPASS and bull_ic >= MIN_IC_REQ + 1
-        siq = ENABLE_IC_BYPASS and bear_ic >= MIN_IC_REQ + 1
-        bbb = (not ENABLE_BB_FILTER) or (bo and (boc  or biq))
-        sbb = (not ENABLE_BB_FILTER) or (so and (boc2 or siq))
-
-        # ── 6. No-Wick Detection ──
-        nlw = is_g and (abs(o - l) <= tol)
-        nuw = is_r and (abs(o - h) <= tol)
-        cb  = nlw and bp and bl and bbb
-        cs  = nuw and sp and sl and sbb
-
-        # ── 7. Instant Signal (Wick >= Body) ──
-        body   = abs(c - o)
-        bw_opp = (h - c) if is_g else 0.0
-        sw_opp = (c - l) if is_r else 0.0
-        hib = ENABLE_INSTANT and body > 0 and bw_opp >= body * WICK_BODY_RATIO
-        his = ENABLE_INSTANT and body > 0 and sw_opp >= body * WICK_BODY_RATIO
+        # ── 2. Determine if candle i is completed/closed ──
+        candle_end = ts + timedelta(minutes=tf_mins)
+        is_closed = (i < len(df) - 1) or (datetime.now(timezone.utc) >= candle_end)
 
         ins = in_session(ts)
 
         def emit(sig_type, price, level, setup_ts=None):
-            key = f"{sig_type}_{ts}"
+            key = f"{sig_type}_{ts}_{setup_ts}" if setup_ts else f"{sig_type}_{ts}"
+            # Only emit live notifications for recent bars (within 2 candle periods)
+            is_recent = (datetime.now(timezone.utc) - ts) <= timedelta(minutes=tf_mins * 2)
             if key not in sent_keys:
-                new_signals.append({'type': sig_type, 'ts': ts, 'price': price,
-                                    'level': level, 'setup_ts': setup_ts})
+                if is_recent:
+                    new_signals.append({'type': sig_type, 'ts': ts, 'price': price,
+                                        'level': level, 'setup_ts': setup_ts})
                 sent_keys.add(key)
 
-        if cb and hib and ins: emit('INSTANT_BUY',  c, l)
-        if cs and his and ins: emit('INSTANT_SELL', c, h)
+        # ── 3. Candidate & Instant Evaluation (STRICTLY ON CLOSED CANDLES ONLY) ──
+        if is_closed:
+            # Previous Candle Same Color
+            prev_green = df['close'].iloc[i-1] > df['open'].iloc[i-1]
+            prev_red   = df['close'].iloc[i-1] < df['open'].iloc[i-1]
+            bp = (not REQUIRE_PREV_COL) or prev_green
+            sp = (not REQUIRE_PREV_COL) or prev_red
 
-        # Register sweeps for non-instant candidates
-        bk = str(ts)
-        existing = {s['ts'] for s in active_setups}
-        if cb and not hib and bk not in existing:
-            active_setups.append({'bar_i': i, 'side': 1,  'level': float(l), 'ts': bk})
-        if cs and not his and bk not in existing:
-            active_setups.append({'bar_i': i, 'side': -1, 'level': float(h), 'ts': bk})
+            # Left Lookback Window Clearance
+            hi_h = df['high'].iloc[max(0, i-LEFT_WINDOW):i].max() if ENABLE_LEFT_FILTER else 0
+            lo_l = df['low'].iloc[max(0, i-LEFT_WINDOW):i].min() if ENABLE_LEFT_FILTER else 9e9
+            bl = (h > hi_h) if LEFT_CLEARANCE else (l > hi_h)
+            sl = (l < lo_l) if LEFT_CLEARANCE else (h < lo_l)
+            if not ENABLE_LEFT_FILTER: bl = sl = True
 
-        # ── 8. Sweep Engine Queue ──
+            # VWAP Band Position Filter
+            if not ENABLE_BB_FILTER:
+                bo = so = True
+            elif BB_ENTIRE_CANDLE:
+                bo, so = l > upp, h < low_
+            else:
+                bo, so = c > upp, c < low_
+
+            # Opposite Band No-Touch Lookback Window
+            boc = boc2 = True
+            if ENABLE_BB_FILTER and i >= BB_LOOKBACK:
+                for k in range(BB_LOOKBACK):
+                    ki = i - k
+                    if df['low'].iloc[ki]  <= df['lower'].iloc[ki]: boc  = False
+                    if df['high'].iloc[ki] >= df['upper'].iloc[ki]: boc2 = False
+
+            biq = ENABLE_IC_BYPASS and bull_ic >= MIN_IC_REQ + 1
+            siq = ENABLE_IC_BYPASS and bear_ic >= MIN_IC_REQ + 1
+            bbb = (not ENABLE_BB_FILTER) or (bo and (boc  or biq))
+            sbb = (not ENABLE_BB_FILTER) or (so and (boc2 or siq))
+
+            # No-Wick Detection (Flat edge)
+            nlw = is_g and (abs(o - l) <= tol)
+            nuw = is_r and (abs(o - h) <= tol)
+            cb  = nlw and bp and bl and bbb
+            cs  = nuw and sp and sl and sbb
+
+            # Instant Signal (Opposite Wick >= Body)
+            body   = abs(c - o)
+            bw_opp = (h - c) if is_g else 0.0
+            sw_opp = (c - l) if is_r else 0.0
+            hib = ENABLE_INSTANT and body > 0 and bw_opp >= body * WICK_BODY_RATIO
+            his = ENABLE_INSTANT and body > 0 and sw_opp >= body * WICK_BODY_RATIO
+
+            # Instant signals fire immediately upon candle close
+            if cb and hib and ins:
+                emit('INSTANT_BUY', c, l)
+            if cs and his and ins:
+                emit('INSTANT_SELL', c, h)
+
+            # Register Setup Dots (Wick < Body) for sweep queue
+            # Note: Dots do NOT trigger alerts; they are queued to wait for a sweep!
+            bk = str(ts)
+            existing = {s['ts'] for s in active_setups}
+            if cb and not hib and bk not in existing:
+                active_setups.append({'bar_i': i, 'side': 1,  'level': float(l), 'ts': bk})
+            if cs and not his and bk not in existing:
+                active_setups.append({'bar_i': i, 'side': -1, 'level': float(h), 'ts': bk})
+
+        # ── 4. Sweep Engine Queue (Active for BOTH closed AND live running candles) ──
         rem = []
         for s in active_setups:
             el = i - s['bar_i']
-            if el < 1: rem.append(s); continue
+            if el < 1:
+                rem.append(s)
+                continue
             if el <= MAX_SWEEP_BARS:
                 if s['side'] == 1 and l <= s['level']:
-                    if ins: emit('SWEEP_BUY',  c, s['level'], s['ts'])
+                    if ins:
+                        emit('SWEEP_BUY', c, s['level'], s['ts'])
                 elif s['side'] == -1 and h >= s['level']:
-                    if ins: emit('SWEEP_SELL', c, s['level'], s['ts'])
+                    if ins:
+                        emit('SWEEP_SELL', c, s['level'], s['ts'])
                 else:
                     rem.append(s)
         active_setups = rem
@@ -581,7 +599,7 @@ def scan_single_task(symbol, tf_code, tf_label, state_entry):
         return symbol, tf_code, tf_label, [], state_entry, False
 
     try:
-        signals, updated_state = detect_signals(df, state_entry, symbol)
+        signals, updated_state = detect_signals(df, state_entry, symbol, tf_code)
         return symbol, tf_code, tf_label, signals, updated_state, True
     except Exception:
         return symbol, tf_code, tf_label, [], state_entry, False
