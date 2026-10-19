@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-VWAP NoWick Alert Bot — Multi-Timeframe Engine (100% Standalone)
+VWAP NoWick Alert Bot — 24/7 Continuous Multi-Timeframe Engine
 - US30 & NAS100 (BlackBull Markets): 5m, 15m, 30m, 1h
 - Gold XAUUSD (OANDA): 5m, 15m, 30m, 1h
 - Forex Pairs (OANDA): 15m, 30m, 1h
-Runs on GitHub Actions 24/7 Free.
-Zero external custom dependencies.
+Runs 24/7 continuously in GitHub Actions (Cycles every 25-30 seconds).
+Zero cron delays. Instant real-time alerts.
 """
 
 import pandas as pd
@@ -23,9 +23,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
 from websocket import create_connection
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ══════════════════════════════════════════════════════════════════════
-#  EMBEDDED TRADINGVIEW WEBSOCKET CLIENT (No extra package needed!)
+#  EMBEDDED TRADINGVIEW WEBSOCKET CLIENT
 # ══════════════════════════════════════════════════════════════════════
 
 class TVWebSocketClient:
@@ -59,28 +60,21 @@ class TVWebSocketClient:
         msg = json.dumps({"m": func, "p": param_list}, separators=(',', ':'))
         return f"~m~{len(msg)}~m~{msg}"
 
-    def send_message(self, func, args):
-        if self.ws:
-            try:
-                self.ws.send(self.create_message(func, args))
-            except Exception:
-                pass
+    def send_message(self, func, param_list):
+        m = self.create_message(func, param_list)
+        self.ws.send(m)
 
     def run(self):
-        session = self.generate_session()
         chart_session = self.generate_chart_session()
-        sym_str = json.dumps({"symbol": self.symbol, "adjustment": "splits"})
 
         self.send_message("set_auth_token", ["unauthorized_user_token"])
         self.send_message("chart_create_session", [chart_session, ""])
-        self.send_message("quote_create_session", [session])
-        self.send_message("quote_set_fields", [session, "ch", "chp", "lp", "volume"])
-        self.send_message("quote_add_symbols", [session, self.symbol, {"flags": ['force_permission']}])
-        self.send_message("resolve_symbol", [chart_session, "symbol_" + self.timeframe, f"={sym_str}"])
-        self.send_message("create_series", [chart_session, "s" + self.timeframe, "s" + self.timeframe, "symbol_" + self.timeframe, self.timeframe, self.candles])
+        sym_spec = json.dumps({'symbol': self.symbol, 'adjustment': 'splits'})
+        self.send_message("resolve_symbol", [chart_session, "symbol_1", f"={sym_spec}"])
+        self.send_message("create_series", [chart_session, "s" + self.timeframe, "s" + self.timeframe, "symbol_1", self.timeframe, self.candles])
 
         st = time.time()
-        while self.result_data is None and (time.time() - st) < 8:
+        while self.result_data is None and (time.time() - st) < 5:
             try:
                 result = self.ws.recv()
                 data = re.split(r'~m~\d+~m~', result)
@@ -99,7 +93,7 @@ class TVWebSocketClient:
             pass
 
 # ══════════════════════════════════════════════════════════════════════
-#  CONFIG — GitHub Secrets
+#  CONFIG — GitHub Secrets & Environment
 # ══════════════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -111,7 +105,6 @@ GMAIL_RECEIVER     = os.environ.get("GMAIL_RECEIVER",     "")
 NTFY_TOPIC         = os.environ.get("NTFY_TOPIC") or "trading_alerts_nowick_99"
 
 # ── Symbols & Timeframes Mapping ─────────────────────────────────────
-# 1. Gold, US30, NAS100: Tracked on 5m, 15m, 30m, 1h
 VIP_SYMBOLS = [
     "OANDA:XAUUSD",       # Gold
     "BLACKBULL:US30",     # Dow Jones (BlackBull Markets)
@@ -124,7 +117,6 @@ VIP_TIMEFRAMES = [
     ("60", "1h"),
 ]
 
-# 2. Regular Forex Pairs: Tracked on 15m, 30m, 1h
 FOREX_SYMBOLS = [
     "OANDA:EURUSD",
     "OANDA:GBPUSD",
@@ -147,7 +139,7 @@ FOREX_TIMEFRAMES = [
     ("60", "1h"),
 ]
 
-# ── Indicator Parameters (Matching User's Pine Script Exactly) ───────
+# ── Indicator Parameters (Matching Pine Script v6 Exactly) ───────────
 BAND_MULT_1        = 1.0
 STRICT_ZERO_WICK   = True
 WICK_TOL_TICKS     = 0
@@ -190,23 +182,26 @@ def save_state(state):
         pass
 
 # ══════════════════════════════════════════════════════════════════════
-#  DATA FETCHING
+#  DATA FETCHING WITH RETRIES
 # ══════════════════════════════════════════════════════════════════════
 
-def fetch_tv_candles(symbol, timeframe="15", count=150):
-    try:
-        ws = TVWebSocketClient(symbol, timeframe, count)
-        ws.connect()
-        ws.run()
-        if not ws.result_data:
-            return None
-        rows = [item['v'] for item in ws.result_data]
-        df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True)
-        df.set_index('ts', inplace=True)
-        return df
-    except Exception:
-        return None
+def fetch_tv_candles(symbol, timeframe="15", count=60):
+    for attempt in range(2):
+        try:
+            ws = TVWebSocketClient(symbol, timeframe, count)
+            ws.connect()
+            ws.run()
+            if not ws.result_data:
+                time.sleep(0.3)
+                continue
+            rows = [item['v'] for item in ws.result_data]
+            df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+            df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True)
+            df.set_index('ts', inplace=True)
+            return df
+        except Exception:
+            time.sleep(0.4)
+    return None
 
 def get_mintick(symbol):
     if "US30" in symbol:
@@ -250,51 +245,46 @@ def add_vwap_bands(df):
     df['lower'] = lower_l
     return df
 
-# ══════════════════════════════════════════════════════════════════════
-#  SESSION FILTER (UTC)
-# ══════════════════════════════════════════════════════════════════════
-
 def in_session(ts):
     if not ENABLE_TIME_FILTER:
         return True
     t = ts.time()
-    from datetime import time as dtime
-    s = dtime(SESSION_START[0], SESSION_START[1])
-    e = dtime(SESSION_END[0],   SESSION_END[1])
-    return s <= t <= e
+    s_start = datetime.strptime(f"{SESSION_START[0]:02d}:{SESSION_START[1]:02d}", "%H:%M").time()
+    s_end   = datetime.strptime(f"{SESSION_END[0]:02d}:{SESSION_END[1]:02d}", "%H:%M").time()
+    return s_start <= t <= s_end
 
 # ══════════════════════════════════════════════════════════════════════
 #  SIGNAL DETECTION ENGINE
 # ══════════════════════════════════════════════════════════════════════
 
-def detect_signals(df, sym_state, symbol):
+def detect_signals(df, sym_state, symbol=""):
     df = add_vwap_bands(df)
-
-    active_setups   = sym_state.get('active_setups',   [])
-    bull_ic         = sym_state.get('bull_ic_count',   0)
-    bear_ic         = sym_state.get('bear_ic_count',   0)
-    bull_hi         = sym_state.get('bull_tracked_hi', None)
-    bear_lo         = sym_state.get('bear_tracked_lo', None)
-    sent_keys       = set(sym_state.get('sent_keys',   []))
-
-    new_signals = []
-    n = len(df)
-    start_i = max(LEFT_WINDOW + BB_LOOKBACK + 2, n - 60)
-
     mintick = get_mintick(symbol)
     tol = 0.0 if STRICT_ZERO_WICK else (WICK_TOL_TICKS * mintick)
 
-    for i in range(start_i, n):
+    sent_keys     = set(sym_state.get('sent_keys', []))
+    new_signals   = []
+    active_setups = []
+
+    bull_ic = 0
+    bull_hi = None
+    bear_ic = 0
+    bear_lo = None
+
+    start_i = max(LEFT_WINDOW + BB_LOOKBACK + 2, 2)
+    for i in range(start_i, len(df)):
         ts = df.index[i]
-        o, h, l, c = df['open'].iloc[i], df['high'].iloc[i], df['low'].iloc[i], df['close'].iloc[i]
-        upp, low_ = df['upper'].iloc[i], df['lower'].iloc[i]
+        o = df['open'].iloc[i]
+        h = df['high'].iloc[i]
+        l = df['low'].iloc[i]
+        c = df['close'].iloc[i]
+        upp  = df['upper'].iloc[i]
+        low_ = df['lower'].iloc[i]
 
-        if pd.isna(upp) or pd.isna(low_):
-            continue
+        is_g = c > o
+        is_r = c < o
 
-        is_g, is_r = c > o, c < o
-
-        # ── 1. IC Progression Tracking ──
+        # ── 1. IC Engine ──
         tl, tu = l <= low_, h >= upp
         if tl:
             bull_ic, bull_hi = (1, h) if is_g else (0, max(bull_hi or h, h))
@@ -433,7 +423,7 @@ def send_discord(msg):
         "embeds": [{
             "description": clean,
             "color": 0x00E676 if "BUY" in msg else 0xEF4444,
-            "footer": {"text": f"VWAP NoWick Bot • {datetime.now(timezone.utc).strftime('%H:%M UTC')}"}
+            "footer": {"text": f"VWAP NoWick Bot 24/7 • {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"}
         }]
     }
     try:
@@ -477,7 +467,7 @@ def send_gmail(subject, plain_body):
             <h2 style="color:{color};margin:0 0 12px">{icon} VWAP NoWick Signal</h2>
             <pre style="font-size:14px;line-height:1.7;white-space:pre-wrap;color:#e6edf3;">{plain_body}</pre>
             <hr style="border-color:#30363d;margin:12px 0">
-            <small style="color:#8b949e;">VWAP NoWick Bot Multi-TF</small>
+            <small style="color:#8b949e;">VWAP NoWick Bot 24/7</small>
           </div>
         </body></html>
         """
@@ -524,15 +514,17 @@ def fmt(disp_name, sig, tf_label):
         'INSTANT_SELL': 'INSTANT SELL — Opposite Wick >= Body',
         'SWEEP_SELL':   'SWEEP SELL   — No-Wick High Swept',
     }
+    disp_now = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
     return (
         f"{icons.get(sig['type'],'🔔')} <b>VWAP NoWick Signal</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Symbol    : <b>{disp_name}</b>\n"
-        f"⏱ Timeframe : <b>{tf_label}</b>\n"
-        f"📌 Signal    : <b>{labels.get(sig['type'], sig['type'])}</b>\n"
-        f"💰 Price     : <b>{sig['price']:.5f}</b>\n"
-        f"📏 Level     : {sig['level']:.5f}\n"
-        f"🕐 Time      : {str(sig['ts'])[:19]} UTC"
+        f"📊 Symbol     : <b>{disp_name}</b>\n"
+        f"⏱ Timeframe  : <b>{tf_label}</b>\n"
+        f"📌 Signal     : <b>{labels.get(sig['type'], sig['type'])}</b>\n"
+        f"💰 Price      : <b>{sig['price']:.5f}</b>\n"
+        f"📏 Level      : {sig['level']:.5f}\n"
+        f"🕐 Candle     : {str(sig['ts'])[:19]} UTC\n"
+        f"⚡ Dispatched : {disp_now}"
     )
 
 def fmt_plain(disp_name, sig, tf_label):
@@ -542,17 +534,60 @@ def fmt_plain(disp_name, sig, tf_label):
         'INSTANT_SELL': 'INSTANT SELL — Opposite Wick >= Body',
         'SWEEP_SELL':   'SWEEP SELL   — No-Wick High Swept',
     }
+    disp_now = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
     return (
-        f"Symbol    : {disp_name}\n"
-        f"Timeframe : {tf_label}\n"
-        f"Signal    : {labels.get(sig['type'], sig['type'])}\n"
-        f"Price     : {sig['price']:.5f}\n"
-        f"Level     : {sig['level']:.5f}\n"
-        f"Time      : {str(sig['ts'])[:19]} UTC"
+        f"Symbol     : {disp_name}\n"
+        f"Timeframe  : {tf_label}\n"
+        f"Signal     : {labels.get(sig['type'], sig['type'])}\n"
+        f"Price      : {sig['price']:.5f}\n"
+        f"Level      : {sig['level']:.5f}\n"
+        f"Candle     : {str(sig['ts'])[:19]} UTC\n"
+        f"Dispatched : {disp_now}"
     )
 
 # ══════════════════════════════════════════════════════════════════════
-#  MAIN MULTI-TIMEFRAME SCANNER
+#  GITHUB SELF-DISPATCH (Infinite 24/7 Chaining)
+# ══════════════════════════════════════════════════════════════════════
+
+def trigger_next_workflow():
+    repo  = os.environ.get("GITHUB_REPOSITORY")
+    token = os.environ.get("GITHUB_TOKEN")
+    if not repo or not token:
+        print("  [i] GITHUB_TOKEN or GITHUB_REPOSITORY not set (skipping self-dispatch).")
+        return
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/bot.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "VWAP-NoWick-Bot"
+    }
+    try:
+        r = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
+        if r.status_code in (200, 204):
+            print("  [+] Next 24/7 workflow cycle successfully dispatched to GitHub!")
+        else:
+            print(f"  [-] Failed to dispatch next workflow: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"  [-] Dispatch error: {e}")
+
+# ══════════════════════════════════════════════════════════════════════
+#  THREADED SCANNER WORKER
+# ══════════════════════════════════════════════════════════════════════
+
+def scan_single_task(symbol, tf_code, tf_label, state_entry):
+    disp_sym = symbol.split(':')[-1]
+    df = fetch_tv_candles(symbol, timeframe=tf_code, count=60)
+    if df is None or len(df) < LEFT_WINDOW + BB_LOOKBACK + 5:
+        return symbol, tf_code, tf_label, [], state_entry, False
+
+    try:
+        signals, updated_state = detect_signals(df, state_entry, symbol)
+        return symbol, tf_code, tf_label, signals, updated_state, True
+    except Exception:
+        return symbol, tf_code, tf_label, [], state_entry, False
+
+# ══════════════════════════════════════════════════════════════════════
+#  MAIN CONTINUOUS RUNNER
 # ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
@@ -574,19 +609,10 @@ if __name__ == "__main__":
         print("--- TEST ALERT DISPATCH COMPLETE ---")
         sys.exit(0)
 
-    now_str = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-    print(f"[{now_str}] Starting Multi-TF Scanner...")
-    print(f"  VIP (Gold, US30, NAS100): 5m, 15m, 30m, 1h")
-    print(f"  Forex (14 Pairs): 15m, 30m, 1h")
-    print(f"  Channels: "
-          f"{'ntfy: ON' if has_ntfy else 'ntfy: OFF'} | "
-          f"{'Discord: ON' if has_discord else 'Discord: OFF'} | "
-          f"{'Gmail: ON' if has_gmail else 'Gmail: OFF'} | "
-          f"{'Telegram: ON' if has_telegram else 'Telegram: OFF'}")
-    print("-" * 60)
-
-    state = load_state()
-    total = 0
+    continuous_mode = "--once" not in sys.argv
+    max_duration    = int(os.environ.get("MAX_RUNTIME_SECONDS", 5 * 3600 + 30 * 60)) # 5.5 hours
+    start_time      = time.time()
+    cycle           = 0
 
     scan_tasks = []
     for s in VIP_SYMBOLS:
@@ -597,27 +623,53 @@ if __name__ == "__main__":
         for code, label in FOREX_TIMEFRAMES:
             scan_tasks.append((s, code, label))
 
-    for symbol, tf_code, tf_label in scan_tasks:
-        key = f"{symbol.replace(':', '_')}_{tf_code}"
-        disp_sym = symbol.split(':')[-1]
+    print(f"\n============================================================")
+    print(f"  VWAP NoWick 24/7 CONTINUOUS MULTI-TIMEFRAME ENGINE")
+    print(f"  Total Tasks: {len(scan_tasks)} | Mode: {'Continuous (Real-time)' if continuous_mode else 'Single Scan'}")
+    print(f"  VIP (Gold, US30, NAS100): 5m, 15m, 30m, 1h")
+    print(f"  Forex (14 Pairs): 15m, 30m, 1h")
+    print(f"  Channels: "
+          f"{'ntfy: ON' if has_ntfy else 'ntfy: OFF'} | "
+          f"{'Discord: ON' if has_discord else 'Discord: OFF'} | "
+          f"{'Gmail: ON' if has_gmail else 'Gmail: OFF'} | "
+          f"{'Telegram: ON' if has_telegram else 'Telegram: OFF'}")
+    print(f"============================================================")
 
-        try:
-            df = fetch_tv_candles(symbol, timeframe=tf_code, count=150)
-            if df is None or len(df) < LEFT_WINDOW + BB_LOOKBACK + 5:
-                continue
+    state = load_state()
 
-            signals, state[key] = detect_signals(df, state.get(key, {}), symbol)
+    while True:
+        cycle += 1
+        now_str = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
+        cycle_signals = 0
+        t0 = time.time()
 
-            for sig in signals:
-                print(f"\n  [!] {disp_sym} [{tf_label}]: {sig['type']} @ {sig['price']:.5f}")
-                send_all(symbol, sig, tf_label)
-                total += 1
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(scan_single_task, sym, code, label, state.get(f"{sym.replace(':', '_')}_{code}", {}))
+                for sym, code, label in scan_tasks
+            ]
+            for f in as_completed(futures):
+                sym, code, label, sigs, updated_state, ok = f.result()
+                key = f"{sym.replace(':', '_')}_{code}"
+                state[key] = updated_state
+                for sig in sigs:
+                    disp_sym = sym.split(':')[-1]
+                    print(f"\n  [!] {disp_sym} [{label}]: {sig['type']} @ {sig['price']:.5f} (Candle: {str(sig['ts'])[:19]} UTC)")
+                    send_all(sym, sig, label)
+                    cycle_signals += 1
 
-            time.sleep(0.12)
+        save_state(state)
+        elapsed = time.time() - t0
+        print(f"[{now_str}] Cycle #{cycle} completed in {elapsed:.1f}s. New signals: {cycle_signals}")
 
-        except Exception:
-            pass
+        if not continuous_mode:
+            break
 
-    save_state(state)
-    print(f"\n{'-'*60}")
-    print(f"  Scan complete. {total} signal(s) sent across all timeframes.")
+        # Check 5.5 hours limit
+        if time.time() - start_time >= max_duration:
+            print(f"\n[!] 5.5-hour continuous run completed. Handing over to next runner...")
+            trigger_next_workflow()
+            sys.exit(0)
+
+        # Sleep between scans (20s)
+        time.sleep(20)
